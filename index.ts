@@ -9,13 +9,16 @@ const QUEST_WORD_PATTERN = /\bquests?\b/i;
 const QUEST_CONTEXT_PATTERN = /\b(promoted|orbs?|play now|share|rewards?|watch\s+\d+\s*(?:m|min|minutes?)|watch the video|get reward)\b/i;
 const QUEST_REWARD_PATTERN = /\b(?:\d+\s*)?orbs?\b/i;
 const PROMOTED_PATTERN = /\bpromoted\b/i;
-const PROMOTED_QUEST_PATTERN = /\b(?:avatar decoration|decorations?|unlock|with nitro|watch\s+\d+\s*(?:m|min|minutes?)|watch the video|get reward)\b/i;
+const QUEST_DECORATION_PATTERN = /\b(?:avatar decoration|decorations?|collectibles?|orbs?|unlock|with nitro|keep it with nitro|rewards?)\b/i;
+const PROMOTED_QUEST_PATTERN = /\b(?:avatar decoration|decorations?|collectibles?|unlock|with nitro|watch\s+\d+\s*(?:m|min|minutes?)|watch the video|get reward)\b/i;
 const REWARD_PATTERN = /\b(?:get|claim|collect)\s+rewards?!?\b/i;
 const WATCH_PATTERN = /\bwatch\s+\d+\s*(?:m|min|minutes?)\b|\bwatch the video\b/i;
 const WATCH_REWARD_PATTERN = /\bwatch\b.{0,100}\b(?:orbs?|reward|quest)\b/i;
-const QUEST_TEXT_NODE_PATTERN = /\b(promoted|quests?|orbs?|watch\s+\d+\s*(?:m|min|minutes?)|watch the video|start video quest|accept quest|claim reward|get reward)\b/i;
+const QUEST_TEXT_NODE_PATTERN = /\b(promoted|quests?|orbs?|avatar decoration|with nitro|watch\s+\d+\s*(?:m|min|minutes?)|watch the video|start video quest|accept quest|claim reward|get reward)\b/i;
 const QUEST_ACTION_PATTERN = /\b(watch\s+\d+\s*(?:m|min|minutes?)|watch the video|start video quest|accept quest|claim reward|get reward)\b/i;
+const QUEST_CARD_COPY_PATTERN = /\b(promoted|quests?|avatar decoration|with nitro|watch\s+\d+\s*(?:m|min|minutes?)|watch the video|get reward|claim reward|orbs?)\b/i;
 const PROMOTED_SELECTOR = "[aria-label*='Promoted' i],[title*='Promoted' i]";
+const QUEST_ACTION_SELECTOR = "button,[role='button'],a";
 const QUEST_SELECTOR = [
     "button",
     "[role='button']",
@@ -37,6 +40,8 @@ let observer: MutationObserver | null = null;
 let scanTimer: number | undefined;
 let intervalId: number | undefined;
 let startRetryId: number | undefined;
+let burstScanId: number | undefined;
+let burstScanCount = 0;
 let started = false;
 const pendingScanRoots = new Set<ParentNode>();
 
@@ -71,6 +76,8 @@ function hasQuestSignal(element: Element) {
     return QUEST_TEXT_PATTERN.test(combined)
         || PROMOTED_PATTERN.test(combined)
         || QUEST_WORD_PATTERN.test(combined) && QUEST_CONTEXT_PATTERN.test(combined)
+        || QUEST_WORD_PATTERN.test(combined) && WATCH_PATTERN.test(combined)
+        || QUEST_DECORATION_PATTERN.test(combined) && WATCH_PATTERN.test(combined)
         || PROMOTED_PATTERN.test(combined) && (QUEST_WORD_PATTERN.test(combined) || QUEST_REWARD_PATTERN.test(combined) || WATCH_PATTERN.test(combined) || WATCH_REWARD_PATTERN.test(combined) || REWARD_PATTERN.test(combined))
         || WATCH_REWARD_PATTERN.test(combined) && QUEST_REWARD_PATTERN.test(combined)
         || QUEST_WORD_PATTERN.test(combined) && REWARD_PATTERN.test(combined)
@@ -119,12 +126,14 @@ function hasQuestCardSignal(element: HTMLElement) {
     const hasQuestWord = QUEST_WORD_PATTERN.test(text);
     const hasPromoted = PROMOTED_PATTERN.test(text);
     const hasAction = QUEST_ACTION_PATTERN.test(text) || hasQuestAction(element);
-    const hasReward = QUEST_REWARD_PATTERN.test(text) || WATCH_REWARD_PATTERN.test(text) || REWARD_PATTERN.test(text);
+    const hasReward = QUEST_REWARD_PATTERN.test(text) || QUEST_DECORATION_PATTERN.test(text) || WATCH_REWARD_PATTERN.test(text) || REWARD_PATTERN.test(text);
 
     return QUEST_TEXT_PATTERN.test(text) && (hasPromoted || hasAction || hasReward)
         || hasPromoted && hasQuestWord
         || hasPromoted && hasAction
         || hasPromoted && PROMOTED_QUEST_PATTERN.test(text)
+        || hasQuestWord && hasAction
+        || hasAction && hasReward
         || hasQuestWord && hasAction && (hasPromoted || hasReward);
 }
 
@@ -150,9 +159,33 @@ function findHideTarget(element: HTMLElement) {
     return target;
 }
 
+function findQuestActionCardRoot(element: HTMLElement) {
+    let current: HTMLElement | null = element;
+    let target: HTMLElement | null = null;
+
+    for (let depth = 0; current && current !== document.body && depth < 16; depth++) {
+        const text = getText(current);
+        if (text.length > MAX_TEXT_LENGTH) break;
+
+        if (QUEST_CARD_COPY_PATTERN.test(text) && isQuestCardRoot(current)) {
+            target = current;
+        }
+
+        current = current.parentElement;
+    }
+
+    return target;
+}
+
 function hide(element: HTMLElement) {
     const target = findHideTarget(element);
     if (!target || target.hasAttribute(HIDDEN_ATTR)) return;
+
+    hideTarget(target);
+}
+
+function hideTarget(target: HTMLElement) {
+    if (target.hasAttribute(HIDDEN_ATTR)) return;
 
     target.setAttribute(HIDDEN_ATTR, "true");
     target.setAttribute("aria-hidden", "true");
@@ -181,6 +214,7 @@ function scan(root: ParentNode = document) {
 
     scanTextNodes(root);
     scanPromotedAnchors(root);
+    scanQuestActions(root);
 }
 
 function scanPromotedAnchors(root: ParentNode = document) {
@@ -195,6 +229,34 @@ function scanPromotedAnchors(root: ParentNode = document) {
     for (const anchor of anchors) {
         if (anchor instanceof HTMLElement) {
             hide(anchor);
+        }
+    }
+}
+
+function scanQuestActions(root: ParentNode = document) {
+    const actions: Element[] = [];
+
+    if (root instanceof Element && root.matches(QUEST_ACTION_SELECTOR)) {
+        actions.push(root);
+    }
+
+    actions.push(...root.querySelectorAll(QUEST_ACTION_SELECTOR));
+
+    for (const action of actions) {
+        if (!(action instanceof HTMLElement)) continue;
+        if (action.closest(`[${HIDDEN_ATTR}]`)) continue;
+
+        const actionText = normalize([
+            action.textContent,
+            action.getAttribute("aria-label"),
+            action.getAttribute("title")
+        ].filter(Boolean).join(" "));
+
+        if (!QUEST_ACTION_PATTERN.test(actionText)) continue;
+
+        const target = findQuestActionCardRoot(action);
+        if (target) {
+            hideTarget(target);
         }
     }
 }
@@ -271,6 +333,24 @@ function scheduleScan(root: ParentNode = document) {
     }, 34);
 }
 
+function startBurstScan() {
+    if (burstScanId != null) return;
+
+    burstScanCount = 0;
+
+    const run = () => {
+        burstScanId = undefined;
+        scan();
+        burstScanCount++;
+
+        if (burstScanCount < 120 && started) {
+            burstScanId = window.setTimeout(run, 250);
+        }
+    };
+
+    burstScanId = window.setTimeout(run, 250);
+}
+
 function startScanning() {
     if (started) return;
 
@@ -292,6 +372,7 @@ function startScanning() {
 
     started = true;
     scan();
+    startBurstScan();
 
     observer = new MutationObserver(mutations => {
         for (const mutation of mutations) {
@@ -323,7 +404,7 @@ function startScanning() {
         characterData: true
     });
 
-    intervalId = window.setInterval(scan, 5000);
+    intervalId = window.setInterval(scan, 1000);
 }
 
 export default definePlugin({
@@ -356,6 +437,12 @@ export default definePlugin({
             scanTimer = undefined;
         }
 
+        if (burstScanId != null) {
+            window.clearTimeout(burstScanId);
+            burstScanId = undefined;
+        }
+
+        burstScanCount = 0;
         pendingScanRoots.clear();
 
         if (intervalId != null) {
