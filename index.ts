@@ -15,10 +15,12 @@ const WATCH_PATTERN = /\bwatch\s+\d+\s*(?:m|min|minutes?)\b|\bwatch the video\b/
 const WATCH_REWARD_PATTERN = /\bwatch\b.{0,100}\b(?:orbs?|reward|quest)\b/i;
 const QUEST_TEXT_NODE_PATTERN = /\b(promoted|quests?|orbs?|watch\s+\d+\s*(?:m|min|minutes?)|watch the video|start video quest|accept quest|claim reward|get reward)\b/i;
 const QUEST_ACTION_PATTERN = /\b(watch\s+\d+\s*(?:m|min|minutes?)|watch the video|start video quest|accept quest|claim reward|get reward)\b/i;
+const PROMOTED_SELECTOR = "[aria-label*='Promoted' i],[title*='Promoted' i]";
 const QUEST_SELECTOR = [
     "button",
     "[role='button']",
     "[role='menuitem']",
+    PROMOTED_SELECTOR,
     "[aria-label*='Quest' i]",
     "[title*='Quest' i]",
     "a[href*='quests' i]",
@@ -67,6 +69,7 @@ function hasQuestSignal(element: Element) {
     if (combined.length > MAX_TEXT_LENGTH) return false;
 
     return QUEST_TEXT_PATTERN.test(combined)
+        || PROMOTED_PATTERN.test(combined)
         || QUEST_WORD_PATTERN.test(combined) && QUEST_CONTEXT_PATTERN.test(combined)
         || PROMOTED_PATTERN.test(combined) && (QUEST_WORD_PATTERN.test(combined) || QUEST_REWARD_PATTERN.test(combined) || WATCH_PATTERN.test(combined) || WATCH_REWARD_PATTERN.test(combined) || REWARD_PATTERN.test(combined))
         || WATCH_REWARD_PATTERN.test(combined) && QUEST_REWARD_PATTERN.test(combined)
@@ -131,11 +134,11 @@ function findHideTarget(element: HTMLElement) {
 
     for (let depth = 0; current && current !== document.body && depth < 18; depth++) {
         if (hasQuestSignal(current) && isReasonablePromoRoot(current)) {
-            target ??= current;
+            target = current;
         }
 
         if (hasQuestCardSignal(current) && isQuestCardRoot(current)) {
-            target ??= current;
+            target = current;
         }
 
         const text = getText(current);
@@ -177,6 +180,23 @@ function scan(root: ParentNode = document) {
     }
 
     scanTextNodes(root);
+    scanPromotedAnchors(root);
+}
+
+function scanPromotedAnchors(root: ParentNode = document) {
+    const anchors: Element[] = [];
+
+    if (root instanceof Element && root.matches(PROMOTED_SELECTOR)) {
+        anchors.push(root);
+    }
+
+    anchors.push(...root.querySelectorAll(PROMOTED_SELECTOR));
+
+    for (const anchor of anchors) {
+        if (anchor instanceof HTMLElement) {
+            hide(anchor);
+        }
+    }
 }
 
 function scanAncestors(root: Node) {
