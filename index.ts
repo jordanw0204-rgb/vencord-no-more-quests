@@ -24,8 +24,6 @@ const QUEST_SELECTOR = [
     "[role='button']",
     "[role='menuitem']",
     PROMOTED_SELECTOR,
-    "[aria-label*='Quest' i]",
-    "[title*='Quest' i]",
     "a[href*='quests' i]",
     "div[class*='quest' i]",
     "div[class*='quests' i]",
