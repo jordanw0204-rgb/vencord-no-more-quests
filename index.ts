@@ -169,14 +169,14 @@ function patchRestAPI() {
         const originalMethod = RestAPI[method];
         originalRestMethods.set(method, originalMethod);
 
-        RestAPI[method] = ((data: Parameters<typeof originalMethod>[0]) => {
+        RestAPI[method] = ((data: Parameters<typeof originalMethod>[0], ...args: any[]) => {
             const url = getRestRequestUrl(data);
 
             if (url && isQuestDecisionUrl(url)) {
                 return Promise.resolve({ body: emptyQuestDecisionBody, ok: true, status: 200 });
             }
 
-            return originalMethod(data);
+            return Reflect.apply(originalMethod, RestAPI, [data, ...args]);
         }) as typeof originalMethod;
     }
 }
