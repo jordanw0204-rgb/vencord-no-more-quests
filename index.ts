@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 Vendicated and contributors
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import definePlugin, { StartAt } from "@utils/types";
 import { FluxDispatcher, RestAPI } from "@webpack/common";
 
@@ -110,7 +116,7 @@ function getRequestUrl(input: RequestInfo | URL) {
 
 function isQuestDecisionUrl(url: string) {
     try {
-        const pathname = new URL(url, window.location.href).pathname;
+        const { pathname } = new URL(url, window.location.href);
 
         return /^\/api\/v\d+\/quests\/(?:decision|get-decisions)$/i.test(pathname);
     } catch {
