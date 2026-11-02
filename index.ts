@@ -18,12 +18,9 @@ const QUEST_DELIVERY_PLACEMENTS = [1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 15, 1
 
 let observer: MutationObserver | null = null;
 let scanTimer: number | undefined;
-let intervalId: number | undefined;
 let startRetryId: number | undefined;
-let burstScanId: number | undefined;
-let burstScanCount = 0;
 let started = false;
-const pendingScanRoots = new Set<ParentNode>();
+const pendingScanRoots = new Set<Element>();
 let originalFetch: typeof window.fetch | null = null;
 let originalDispatch: typeof FluxDispatcher.dispatch | null = null;
 const originalRestMethods = new Map<keyof typeof RestAPI, typeof RestAPI[keyof typeof RestAPI]>();
@@ -216,11 +213,21 @@ function isQuestCardRoot(element: HTMLElement) {
         && height <= Math.max(560, window.innerHeight * 0.75);
 }
 
-function hasQuestCardCopy(element: HTMLElement) {
-    const text = normalize(element.textContent ?? "");
-    if (text.length > 2600) return false;
+function hasQuestCardCopy(element: HTMLElement, actionText = "") {
+    // Joining text nodes preserves boundaries between headings, copy and
+    // buttons without innerText's synchronous layout. Bound ancestor reads.
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    const parts: string[] = [];
+    let length = 0;
+    while (walker.nextNode()) {
+        const part = walker.currentNode.textContent ?? "";
+        length += part.length + 1;
+        if (length > 2600 || parts.length >= 120) return false;
+        parts.push(part);
+    }
+    const text = normalize(parts.join(" "));
 
-    return QUEST_ACTION_PATTERN.test(text)
+    return (QUEST_ACTION_PATTERN.test(actionText) || QUEST_ACTION_PATTERN.test(text))
         && QUEST_CARD_PATTERN.test(text)
         && QUEST_STRONG_CARD_PATTERN.test(text);
 }
@@ -228,9 +235,10 @@ function hasQuestCardCopy(element: HTMLElement) {
 function findQuestCardRoot(action: HTMLElement) {
     let current: HTMLElement | null = action;
     let target: HTMLElement | null = null;
+    const actionText = getActionText(action);
 
     for (let depth = 0; current && current !== document.body && depth < 12; depth++) {
-        if (isQuestCardRoot(current) && hasQuestCardCopy(current)) {
+        if (hasQuestCardCopy(current, actionText) && isQuestCardRoot(current)) {
             target = current;
         }
 
@@ -250,7 +258,7 @@ function hideTarget(target: HTMLElement) {
     target.style.setProperty("pointer-events", "none", "important");
 }
 
-function scan(root: ParentNode = document) {
+function scan(root: ParentNode = document, targets = new Set<HTMLElement>()) {
     const actions: Element[] = [];
 
     if (root instanceof Element && root.matches(QUEST_ACTION_SELECTOR)) {
@@ -265,45 +273,45 @@ function scan(root: ParentNode = document) {
         if (!QUEST_ACTION_PATTERN.test(getActionText(action))) continue;
 
         const target = findQuestCardRoot(action);
-        if (target) {
-            hideTarget(target);
-        }
+        if (target) targets.add(target);
     }
+    return targets;
 }
 
-function scheduleScan(root: ParentNode = document) {
-    pendingScanRoots.add(root);
-
+function scheduleScan(root: Element) {
+    // Text inside a button can arrive separately from the button itself.
+    pendingScanRoots.add(root.closest(QUEST_ACTION_SELECTOR) ?? root);
     if (scanTimer != null) return;
 
     scanTimer = window.setTimeout(() => {
         scanTimer = undefined;
-
-        const roots = [...pendingScanRoots];
+        const roots = new Set(pendingScanRoots);
         pendingScanRoots.clear();
-
+        const targets = new Set<HTMLElement>();
         for (const scanRoot of roots) {
-            scan(scanRoot);
+            if (!scanRoot.isConnected) continue;
+            let parent = scanRoot.parentElement;
+            while (parent && !roots.has(parent)) parent = parent.parentElement;
+            // A queued parent scan already includes all of this subtree.
+            if (!parent) scan(scanRoot, targets);
         }
+        // Complete size reads before changing styles on any of the cards.
+        for (const target of targets) hideTarget(target);
     }, 50);
 }
 
-function startBurstScan() {
-    if (burstScanId != null) return;
-
-    burstScanCount = 0;
-
-    const run = () => {
-        burstScanId = undefined;
-        scan();
-        burstScanCount++;
-
-        if (burstScanCount < 80 && started) {
-            burstScanId = window.setTimeout(run, 250);
+function scheduleQuestCopyChange(element: HTMLElement) {
+    scheduleScan(element);
+    // A card may be assembled in stages: reward copy can arrive after its
+    // action. Only quest-related text warrants inspecting its ancestors.
+    if (!QUEST_CARD_PATTERN.test(element.textContent ?? "")) return;
+    let parent = element.parentElement;
+    for (let depth = 0; parent && parent !== document.body && depth < 12; depth++, parent = parent.parentElement) {
+        if (hasQuestCardCopy(parent)) {
+            scheduleScan(parent);
+            return;
         }
-    };
-
-    burstScanId = window.setTimeout(run, 250);
+    }
 }
 
 function startScanning() {
@@ -331,21 +339,24 @@ function startScanning() {
     clearDeliveredQuests();
 
     started = true;
-    scan();
-    startBurstScan();
+    for (const target of scan()) hideTarget(target);
 
     observer = new MutationObserver(mutations => {
         for (const mutation of mutations) {
             for (const node of mutation.addedNodes) {
-                if (node instanceof Element) {
-                    scheduleScan(node);
+                if (node instanceof HTMLElement) {
+                    scheduleQuestCopyChange(node);
                 } else if (node.parentNode instanceof HTMLElement) {
-                    scheduleScan(node.parentNode);
+                    scheduleQuestCopyChange(node.parentNode);
                 }
             }
 
+            if (mutation.type === "attributes" && mutation.target instanceof HTMLElement) {
+                scheduleScan(mutation.target);
+            }
+
             if (mutation.type === "characterData" && mutation.target.parentNode instanceof HTMLElement) {
-                scheduleScan(mutation.target.parentNode);
+                scheduleQuestCopyChange(mutation.target.parentNode);
             }
         }
     });
@@ -353,10 +364,11 @@ function startScanning() {
     observer.observe(document.body, {
         childList: true,
         subtree: true,
-        characterData: true
+        characterData: true,
+        attributes: true,
+        attributeFilter: ["aria-label", "title"]
     });
 
-    intervalId = window.setInterval(scan, 1500);
 }
 
 export default definePlugin({
@@ -404,18 +416,7 @@ export default definePlugin({
             scanTimer = undefined;
         }
 
-        if (burstScanId != null) {
-            window.clearTimeout(burstScanId);
-            burstScanId = undefined;
-        }
-
-        burstScanCount = 0;
         pendingScanRoots.clear();
-
-        if (intervalId != null) {
-            window.clearInterval(intervalId);
-            intervalId = undefined;
-        }
 
         for (const element of document.querySelectorAll<HTMLElement>(`[${HIDDEN_ATTR}]`)) {
             element.removeAttribute(HIDDEN_ATTR);
